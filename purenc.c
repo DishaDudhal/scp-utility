@@ -13,7 +13,7 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <stdarg.h>
-//#include <gcrypt.h>
+#include <gcrypt.h>
 
 #define BUF_SIZE 1024
 #define ITERATIONS 4096
@@ -22,7 +22,9 @@
 #define HMAC_SIZE 32
 #define KEY_SIZE 32
 #define SALT_SIZE 16
+#define IV_SIZE 16
 
+char *iv = "Kf5gM1tRj7Lp8q9H";
 char *progname;
 
 void print_usage() {
@@ -93,4 +95,114 @@ int main(int argc, char *argv[]) {
     printf("Enter password: ");
     fgets(password, BUF_SIZE, stdin);
     password[strcspn(password, "\n")] = '\0';
+
+    // Generate key and salt from password using PBKDF2
+    gcry_error_t err;
+    gcry_cipher_hd_t cipher;
+    unsigned char* key = malloc(gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256));
+    unsigned char* salt = malloc(BUF_SIZE);
+    size_t salt_len = gcry_cipher_get_algo_blklen(GCRY_CIPHER_AES256);
+    err = gcry_kdf_derive(password, strlen(password), GCRY_KDF_PBKDF2,
+        GCRY_MD_SHA256, salt, BUF_SIZE, 10000, gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256), key);
+    if (err) {
+        print_error("Key derivation failed");
+        free(password);
+        free(key);
+        free(salt);
+        return 1;
+    }
+
+    //Initialize HMAC
+    gcry_md_hd_t hmac;
+    err = gcry_md_open(&hmac, GCRY_MD_SHA256, GCRY_MD_FLAG_HMAC);
+    if (err) {
+    print_error("HMAC initialization failed");
+    free(password);
+    free(key);
+    free(salt);
+    return 1;
+    }
+    //Set the key
+    err = gcry_md_setkey(hmac, key, KEY_SIZE);
+    if (err) {
+    print_error("HMAC key setting failed");
+    gcry_md_close(hmac);
+    free(password);
+    free(key);
+    free(salt);
+    return 1;
+    }
+
+    // Initialize encryption/decryption
+    err = gcry_cipher_open(&cipher, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_CBC, GCRY_CIPHER_SECURE);
+    if (err) {
+        print_error("Cipher initialization failed");
+        gcry_md_close(hmac);
+        free(password);
+        free(key);
+        free(salt);
+        return 1;
+    }
+    err = gcry_cipher_setkey(cipher, key, gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256));
+    if (err) {
+        print_error("Cipher key setting failed");
+        gcry_md_close(hmac);
+        gcry_cipher_close(cipher);
+        free(password);
+        free(key);
+        free(salt);
+        return 1;
+    }
+    err = gcry_cipher_setiv(cipher, iv, IV_SIZE);
+    if (err) {
+        print_error("Cipher IV setting failed");
+        gcry_md_close(hmac);
+        gcry_cipher_close(cipher);
+        free(password);
+        free(key);
+        free(salt);
+        return 1;
+    }
+
+    //Encrypt the input file
+    // Create output file
+    output_file = malloc(strlen(input_file) + 5);
+    strcpy(output_file, input_file);
+    strcat(output_file, ".pur");
+    printf("%s",output_file);
+    FILE* out_file = fopen(output_file, "wb");
+    if (out_file == NULL) {
+        print_error("Could not create output file");
+        gcry_md_close(hmac);
+        gcry_cipher_close(cipher);
+        free(password);
+        free(key);
+        free(salt);
+        return 1;
+    }
+
+    // Write salt and IV to the output file
+    fwrite(salt, SALT_SIZE, 1, out_file);
+    fwrite(iv, strlen(iv), 1, out_file);
+
+    // Encrypt the input file and write it to the output file
+    file = fopen(input_file, "rb");
+    unsigned char buf[BUF_SIZE];
+    size_t nread;
+    //gcry_cipher_setiv(cipher, iv, strlen(iv));
+    while ((nread = fread(buf, 1, BUF_SIZE, file)) > 0) {
+        gcry_cipher_encrypt(cipher, buf, nread, buf, BUF_SIZE);
+        gcry_md_write(hmac, buf, nread);
+        fwrite(buf, 1, nread, out_file);
+    }
+    fclose(file);
+    fclose(out_file);
+
+    // Finalize HMAC
+    unsigned char* hmac_result = gcry_md_read(hmac, GCRY_MD_SHA256);
+    out_file = fopen(output_file, "wb");
+    fwrite(hmac_result, HMAC_SIZE, 1, out_file);
+    fclose(out_file);
+
+    printf("Encryption complete.\n");
 }
