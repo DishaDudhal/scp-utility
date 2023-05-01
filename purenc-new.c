@@ -100,9 +100,10 @@ int main(int argc, char *argv[]) {
     gcry_error_t err;
     gcry_cipher_hd_t cipher;
     unsigned char* key = malloc(gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256));
-    unsigned char* salt = malloc(BUF_SIZE);
+    unsigned char* salt = malloc(SALT_SIZE);
     size_t salt_len = gcry_cipher_get_algo_blklen(GCRY_CIPHER_AES256);
-    printf("The salt is %s\nThe salt length is %d ", &salt, &salt_len);
+    gcry_randomize(salt, salt_len, GCRY_STRONG_RANDOM);
+    printf("The salt is %s\nThe salt length is %d ", salt, salt_len);
     err = gcry_kdf_derive(password, strlen(password), GCRY_KDF_PBKDF2,
         GCRY_MD_SHA256, salt, BUF_SIZE, 10000, gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256), key);
     if (err) {
@@ -278,7 +279,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         // Send encrypted file
-        FILE* input = fopen(out_file, "rb");
+        FILE* input = fopen(output_file, "rb");
         if (input == NULL) {
             print_error("Output file not found");
             close(sockfd);
