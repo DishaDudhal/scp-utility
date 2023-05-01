@@ -102,6 +102,7 @@ int main(int argc, char *argv[]) {
     unsigned char* key = malloc(gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256));
     unsigned char* salt = malloc(BUF_SIZE);
     size_t salt_len = gcry_cipher_get_algo_blklen(GCRY_CIPHER_AES256);
+    printf("The salt is %s\nThe salt length is %d ", &salt, &salt_len);
     err = gcry_kdf_derive(password, strlen(password), GCRY_KDF_PBKDF2,
         GCRY_MD_SHA256, salt, BUF_SIZE, 10000, gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256), key);
     if (err) {
@@ -185,24 +186,119 @@ int main(int argc, char *argv[]) {
     fwrite(salt, SALT_SIZE, 1, out_file);
     fwrite(iv, strlen(iv), 1, out_file);
 
-    // Encrypt the input file and write it to the output file
+    // Encrypt the input file and write the output to the output file
     file = fopen(input_file, "rb");
-    unsigned char buf[BUF_SIZE];
-    size_t nread;
-    //gcry_cipher_setiv(cipher, iv, strlen(iv));
-    while ((nread = fread(buf, 1, BUF_SIZE, file)) > 0) {
-        gcry_cipher_encrypt(cipher, buf, nread, buf, BUF_SIZE);
-        gcry_md_write(hmac, buf, nread);
-        fwrite(buf, 1, nread, out_file);
+    unsigned char in_buffer[BUF_SIZE];
+    unsigned char out_buffer[BUF_SIZE];
+    size_t bytes_read, bytes_written, total_bytes_written = 0;
+    while ((bytes_read = fread(in_buffer, 1, BUF_SIZE, file)) > 0) {
+        gcry_cipher_encrypt(cipher, out_buffer, bytes_read, in_buffer, bytes_read);
+        gcry_md_write(hmac, out_buffer, bytes_read);
+        bytes_written = fwrite(out_buffer, 1, bytes_read, out_file);
+        printf("Successfully read %d bytes, and wrote %d bytes", &bytes_read, &bytes_written);
+        total_bytes_written += bytes_written;
+        if (bytes_written < bytes_read) {
+            print_error("Output file write error");
+            free(password);
+            free(key);
+            free(salt);
+            fclose(input_file);
+            fclose(out_file);
+            gcry_cipher_close(cipher);
+            gcry_md_close(hmac);
+            return 1;
+        }
     }
+    // Add HMAC tag to the end of the output file
+    unsigned char* tag = gcry_md_read(hmac, GCRY_MD_SHA256);
+    bytes_written = fwrite(tag, 1, HMAC_SIZE, out_file);
+    if (bytes_written < HMAC_SIZE) {
+        print_error("Output file write error");
+        free(password);
+        free(key);
+        free(salt);
+        fclose(file);
+        fclose(out_file);
+        gcry_cipher_close(cipher);
+        gcry_md_close(hmac);
+        return 1;
+    }
+
+    // Close the input and output files
     fclose(file);
     fclose(out_file);
 
-    // Finalize HMAC
-    unsigned char* hmac_result = gcry_md_read(hmac, GCRY_MD_SHA256);
-    out_file = fopen(output_file, "wb");
-    fwrite(hmac_result, HMAC_SIZE, 1, out_file);
-    fclose(out_file);
+    // Encrypt the input file and write it to the output file
+    // file = fopen(input_file, "rb");
+    // unsigned char buf[BUF_SIZE];
+    // size_t nread;
+    // //gcry_cipher_setiv(cipher, iv, strlen(iv));
+    // while ((nread = fread(buf, 1, BUF_SIZE, file)) > 0) {
+    //     gcry_cipher_encrypt(cipher, buf, nread, buf, BUF_SIZE);
+    //     size_t bytes_written = sizeof(buf);
+    //     printf("Successfully read %d bytes, and wrote %d bytes", &nread, &bytes_written);
+    //     gcry_md_write(hmac, buf, nread);
+    //     printf("Tagged the file with HMAC");
+    //     fwrite(buf, 1, nread, out_file);
+    // }
+    // printf("Successfully encrypted %s to %s");
+    // fclose(file);
+    // fclose(out_file);
+
+    // // Finalize HMAC
+    // unsigned char* hmac_result = gcry_md_read(hmac, GCRY_MD_SHA256);
+    // out_file = fopen(output_file, "wb");
+    // fwrite(hmac_result, HMAC_SIZE, 1, out_file);
+    // fclose(out_file);
 
     printf("Encryption complete.\n");
+
+    // Connect to destination over the network
+    if (is_network) {
+        // Resolve IP address
+        struct sockaddr_in server_addr;
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(atoi(output_port));
+        if (inet_pton(AF_INET, output_addr, &server_addr.sin_addr) <= 0) {
+            print_error("Invalid IP address");
+            return 1;
+        }
+
+        // Connect to server
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            print_error("Socket creation failed");
+            return 1;
+        }
+
+        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            print_error("Connection failed");
+            close(sockfd);
+            return 1;
+        }
+        // Send encrypted file
+        FILE* input = fopen(out_file, "rb");
+        if (input == NULL) {
+            print_error("Output file not found");
+            close(sockfd);
+            return 1;
+        }
+
+        unsigned char buffer[BUF_SIZE];
+        size_t bytes_read;
+        while ((bytes_read = fread(buffer, 1, BUF_SIZE, input)) > 0) {
+            ssize_t bytes_sent = send(sockfd, buffer, bytes_read, 0);
+            if (bytes_sent != bytes_read) {
+                print_error("File send failed");
+                fclose(input);
+                close(sockfd);
+                return 1;
+            }
+            printf("Successfully sent %d bytes", &bytes_sent);
+        }
+
+        fclose(input);
+        close(sockfd);
+    }
 }
