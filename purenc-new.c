@@ -25,6 +25,7 @@
 #define IV_SIZE 16
 
 char *iv = "Kf5gM1tRj7Lp8q9H";
+char *salt = "w7eU4b4x3qX9sL8N";
 char *progname;
 
 void print_usage() {
@@ -100,12 +101,10 @@ int main(int argc, char *argv[]) {
     gcry_error_t err;
     gcry_cipher_hd_t cipher;
     unsigned char* key = malloc(gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256));
-    unsigned char* salt = malloc(SALT_SIZE);
     size_t salt_len = gcry_cipher_get_algo_blklen(GCRY_CIPHER_AES256);
-    gcry_randomize(salt, salt_len, GCRY_STRONG_RANDOM);
     printf("The salt is %s\nThe salt length is %d ", salt, salt_len);
     err = gcry_kdf_derive(password, strlen(password), GCRY_KDF_PBKDF2,
-        GCRY_MD_SHA256, salt, BUF_SIZE, 10000, gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256), key);
+        GCRY_MD_SHA256, salt, salt_len, 10000, gcry_cipher_get_algo_keylen(GCRY_CIPHER_AES256), key);
     if (err) {
         print_error("Key derivation failed");
         free(password);
@@ -172,6 +171,8 @@ int main(int argc, char *argv[]) {
     strcpy(output_file, input_file);
     strcat(output_file, ".pur");
     printf("%s",output_file);
+
+    //Check if the output file already exists
     FILE* out_file = fopen(output_file, "wb");
     if (out_file == NULL) {
         print_error("Could not create output file");
@@ -183,42 +184,45 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Write salt and IV to the output file
-    fwrite(salt, SALT_SIZE, 1, out_file);
-    fwrite(iv, strlen(iv), 1, out_file);
-
     // Encrypt the input file and write the output to the output file
-    file = fopen(input_file, "rb");
-    unsigned char in_buffer[BUF_SIZE];
-    unsigned char out_buffer[BUF_SIZE];
-    size_t bytes_read, bytes_written, total_bytes_written = 0;
-    while ((bytes_read = fread(in_buffer, 1, BUF_SIZE, file)) > 0) {
-        gcry_cipher_encrypt(cipher, out_buffer, bytes_read, in_buffer, bytes_read);
-        gcry_md_write(hmac, out_buffer, bytes_read);
-        bytes_written = fwrite(out_buffer, 1, bytes_read, out_file);
-        printf("Successfully read %d bytes, and wrote %d bytes", &bytes_read, &bytes_written);
-        total_bytes_written += bytes_written;
-        if (bytes_written < bytes_read) {
-            print_error("Output file write error");
-            free(password);
-            free(key);
-            free(salt);
-            fclose(input_file);
-            fclose(out_file);
-            gcry_cipher_close(cipher);
-            gcry_md_close(hmac);
-            return 1;
-        }
+    FILE* in_file = fopen(input_file, "rb");
+    // Allocate memory for the encrypted data buffer
+    unsigned char *encrypted_data = malloc(BUF_SIZE);
+    size_t encrypted_data_len = 0;
+
+    // Read and encrypt data from the input file
+    unsigned char *in_buffer = malloc(BUF_SIZE);
+    size_t bytes_read = 0;
+    while ((bytes_read = fread(in_buffer, 1, BUF_SIZE, in_file)) > 0) {
+        // Allocate memory for the encrypted block
+        unsigned char *encrypted_block = malloc(bytes_read);
+        size_t encrypted_block_len = bytes_read;
+        // Encrypt the block
+        gcry_cipher_encrypt(cipher, encrypted_block, encrypted_block_len, in_buffer, bytes_read);
+        printf("Read %zu bytes and wrote %zu bytes", bytes_read, encrypted_block_len);
+        // Append the encrypted block to the encrypted data buffer
+        encrypted_data = realloc(encrypted_data, encrypted_data_len + encrypted_block_len);
+        memcpy(encrypted_data + encrypted_data_len, encrypted_block, encrypted_block_len);
+        encrypted_data_len += encrypted_block_len;
+
+        // Free the encrypted block memory
+        free(encrypted_block);
     }
+
+    // Write the encrypted data to the output file
+    fwrite(encrypted_data, 1, encrypted_data_len, out_file);
+
     // Add HMAC tag to the end of the output file
+    gcry_md_write(hmac, encrypted_data, encrypted_data_len);
     unsigned char* tag = gcry_md_read(hmac, GCRY_MD_SHA256);
-    bytes_written = fwrite(tag, 1, HMAC_SIZE, out_file);
+    //printf("\nThe hmac generated is %s", tag);
+    size_t bytes_written = fwrite(tag, 1, HMAC_SIZE, out_file);
     if (bytes_written < HMAC_SIZE) {
         print_error("Output file write error");
         free(password);
         free(key);
         free(salt);
-        fclose(file);
+        fclose(in_file);
         fclose(out_file);
         gcry_cipher_close(cipher);
         gcry_md_close(hmac);
@@ -226,33 +230,10 @@ int main(int argc, char *argv[]) {
     }
 
     // Close the input and output files
-    fclose(file);
+    fclose(in_file);
     fclose(out_file);
 
-    // Encrypt the input file and write it to the output file
-    // file = fopen(input_file, "rb");
-    // unsigned char buf[BUF_SIZE];
-    // size_t nread;
-    // //gcry_cipher_setiv(cipher, iv, strlen(iv));
-    // while ((nread = fread(buf, 1, BUF_SIZE, file)) > 0) {
-    //     gcry_cipher_encrypt(cipher, buf, nread, buf, BUF_SIZE);
-    //     size_t bytes_written = sizeof(buf);
-    //     printf("Successfully read %d bytes, and wrote %d bytes", &nread, &bytes_written);
-    //     gcry_md_write(hmac, buf, nread);
-    //     printf("Tagged the file with HMAC");
-    //     fwrite(buf, 1, nread, out_file);
-    // }
-    // printf("Successfully encrypted %s to %s");
-    // fclose(file);
-    // fclose(out_file);
-
-    // // Finalize HMAC
-    // unsigned char* hmac_result = gcry_md_read(hmac, GCRY_MD_SHA256);
-    // out_file = fopen(output_file, "wb");
-    // fwrite(hmac_result, HMAC_SIZE, 1, out_file);
-    // fclose(out_file);
-
-    printf("Encryption complete.\n");
+    printf("\nEncryption complete.\n");
 
     // Connect to destination over the network
     if (is_network) {
@@ -278,6 +259,13 @@ int main(int argc, char *argv[]) {
             close(sockfd);
             return 1;
         }
+
+        // Send the filename to the server
+        int n = send(sockfd, input_file, strlen(input_file), 0);
+        if (n < 0) {
+            print_error("Sending input file name failed");
+        }
+
         // Send encrypted file
         FILE* input = fopen(output_file, "rb");
         if (input == NULL) {
@@ -296,7 +284,7 @@ int main(int argc, char *argv[]) {
                 close(sockfd);
                 return 1;
             }
-            printf("Successfully sent %d bytes", &bytes_sent);
+            printf("Successfully sent %d bytes", bytes_sent);
         }
 
         fclose(input);
